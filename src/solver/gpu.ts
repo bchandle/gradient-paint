@@ -274,15 +274,15 @@ export class GpuSolver {
     this.device.queue.submit([enc.finish()]);
   }
 
-  writeSolution(data: Float32Array): void {
+  writeSolution(data: Float32Array<ArrayBuffer>): void {
     this.device.queue.writeBuffer(this.a[0], 0, data);
   }
 
-  writeRhs(data: Float32Array): void {
+  writeRhs(data: Float32Array<ArrayBuffer>): void {
     this.device.queue.writeBuffer(this.rhs[0], 0, data);
   }
 
-  readSolution(): Promise<Float32Array> {
+  readSolution(): Promise<Float32Array<ArrayBuffer>> {
     return readBuffer(this.device, this.a[0]);
   }
 
@@ -302,7 +302,7 @@ export class GpuSolver {
   }
 }
 
-export async function readBuffer(device: GPUDevice, src: GPUBuffer, size = src.size): Promise<Float32Array> {
+export async function readBuffer(device: GPUDevice, src: GPUBuffer, size = src.size): Promise<Float32Array<ArrayBuffer>> {
   const staging = device.createBuffer({ size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const enc = device.createCommandEncoder();
   enc.copyBufferToBuffer(src, 0, staging, 0, size);
@@ -315,7 +315,7 @@ export async function readBuffer(device: GPUDevice, src: GPUBuffer, size = src.s
 }
 
 /** Upload rgba32float data into a new texture usable as a gradient field. */
-export function createFloatTexture(device: GPUDevice, width: number, height: number, data?: Float32Array, extraUsage = 0): GPUTexture {
+export function createFloatTexture(device: GPUDevice, width: number, height: number, data?: Float32Array<ArrayBuffer>, extraUsage = 0): GPUTexture {
   const tex = device.createTexture({
     size: [width, height],
     format: 'rgba32float',

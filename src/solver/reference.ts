@@ -46,7 +46,7 @@ export class Field {
     if (x < 0 || y < 0 || x >= this.width || y >= this.height) return 0;
     return this.data[(y * this.width + x) * CHANNELS + c];
   }
-  toFloat32(): Float32Array {
+  toFloat32(): Float32Array<ArrayBuffer> {
     return new Float32Array(this.data);
   }
 }

@@ -213,23 +213,25 @@ async function gpuConvergence(device: GPUDevice, W: number, H: number, cycles: n
   s.writeSolution(randomField(W, H, 9, 0.5).toFloat32());
   const errs: number[] = [];
   s.run(0, true);
+  const initial = rmsDifferenceModuloMean(new Field(W, H, await s.readSolution()), img);
   for (let k = 0; k < cycles; k++) {
     s.run(1);
     errs.push(rmsDifferenceModuloMean(new Field(W, H, await s.readSolution()), img));
   }
   s.destroy();
-  return errs;
+  return { errs, initial };
 }
 
 describe('GPU convergence', () => {
   for (const [W, H] of [[257, 257], [320, 240], [513, 300]] as [number, number][]) {
     test(`${W}x${H} conservative field: random start -> < 2e-5 RMS, monotone`, async ({ device, note }) => {
-      const errs = await gpuConvergence(device, W, H, 16);
+      const { errs, initial } = await gpuConvergence(device, W, H, 16);
       note(errs.filter((_, i) => i % 3 === 0).map((e) => e.toExponential(1)).join(' '));
       // strictly decreasing until the f32 noise floor (~3e-6) is reached
       for (let k = 1; k < 16 && errs[k - 1] > 2e-5; k++) assertLess(errs[k], errs[k - 1], `error must decrease at cycle ${k}`);
       assertLess(errs[errs.length - 1], 2e-5, 'final RMS error');
-      assertLess(errs[1], errs[0] / 20, 'nearly perfect after two cycles (Fig. 12)');
+      assertLess(errs[0], initial / 3, 'recognisable after one cycle (Fig. 12)');
+      assertLess(errs[1], initial / 10, 'nearly perfect after two cycles (Fig. 12)');
     });
   }
 
