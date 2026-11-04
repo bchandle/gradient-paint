@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Gradient Paint</title>
+    <meta name="description" content="Real-time gradient-domain painting in the browser (McCann &amp; Pollard 2008), with a WebGPU multigrid integrator." />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' x2='1'%3E%3Cstop offset='0' stop-color='%23243b8f'/%3E%3Cstop offset='1' stop-color='%23f2b84b'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='7' fill='url(%23g)'/%3E%3Cpath d='M8 9h16L16 24z' fill='none' stroke='white' stroke-width='2.6' stroke-linejoin='round'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body>
+    <header id="toolbar">
+      <div class="brand" title="Real-Time Gradient-Domain Painting — McCann &amp; Pollard, SIGGRAPH 2008"><span class="nabla">∇</span> Gradient Paint</div>
+      <div class="group">
+        <button id="btn-new" title="New blank canvas (N)">New</button>
+        <button id="btn-open" title="Open an image (O, or drop a file)">Open</button>
+        <button id="btn-save" title="Save the result as PNG (D / Ctrl+S)">Save</button>
+        <input type="file" id="open-file" accept="image/*,.ppm" hidden />
+      </div>
+      <div class="group segmented" id="modes" title="Brush (Up / Down)"></div>
+      <div class="group segmented" id="blends" title="Blend mode (Left / Right)"></div>
+      <div class="group">
+        <button id="btn-undo" title="Undo (Ctrl+Z); Backspace deletes the current stroke">Undo</button>
+        <button id="btn-revert" title="Revert to the original image (Shift+Backspace)">Revert</button>
+      </div>
+      <div class="spacer"></div>
+      <button id="btn-help" class="icon" title="Help (F1 / ?)">?</button>
+    </header>
+
+    <main id="stage">
+      <canvas id="gpu"></canvas>
+      <canvas id="overlay"></canvas>
+      <div id="hud-view" class="hud-label"></div>
+      <div id="hud-mode" class="hud-label right"></div>
+      <div id="toasts"></div>
+      <div id="help" hidden>
+        <div class="help-inner">
+          <h2>Gradient Paint</h2>
+          <p class="lede">
+            You paint <em>gradients</em>, not colours: every stroke edits the image's x- and y-derivatives, and a multigrid
+            integrator running on the GPU turns them back into an image every frame. Strokes are directional — the colour
+            goes on the left of the direction you draw, its complement on the right.
+          </p>
+          <div class="cols">
+            <section>
+              <h3>Brushes <kbd>↑</kbd> <kbd>↓</kbd></h3>
+              <dl>
+                <dt>Paint</dt><dd>Left-drag paints an oriented edge in the current colour. Right-drag picks hue/saturation; <kbd>Shift</kbd>+right-drag picks value (−1…1; negative flips the edge).</dd>
+                <dt>Clone</dt><dd>Right-click sets the source, then left-drag copies gradients from there.</dd>
+                <dt>Edge</dt><dd>Right-drag along an edge in the image to capture it (<kbd>Shift</kbd>+right-click extends it), then left-drag to paint copies of it. The capture loops along long strokes.</dd>
+              </dl>
+              <h3>Blend modes <kbd>←</kbd> <kbd>→</kbd></h3>
+              <dl>
+                <dt>add</dt><dd>accumulates strokes — sketching, shading</dd>
+                <dt>dir</dt><dd>strengthens existing gradients pointing the brush's way — lighting, contrast</dd>
+                <dt>max</dt><dd>keeps the stronger gradient — cloning, copying edges</dd>
+                <dt>min</dt><dd>keeps the weaker gradient — smoothing, removing wrinkles</dd>
+                <dt>over</dt><dd>replaces gradients — cloning, erasing</dd>
+              </dl>
+            </section>
+            <section>
+              <h3>Strokes</h3>
+              <dl>
+                <dt><kbd>Shift</kbd>+click</dt><dd>continue the current stroke in a straight line</dd>
+                <dt>wheel, <kbd>[</kbd> <kbd>]</kbd></dt><dd>brush size</dd>
+                <dt><kbd>g</kbd></dt><dd>drag the current stroke; click to drop, right-click/<kbd>Esc</kbd> to cancel</dd>
+                <dt><kbd>Backspace</kbd></dt><dd>delete the current stroke</dd>
+                <dt><kbd>Ctrl</kbd>+<kbd>Z</kbd></dt><dd>undo (multi-level)</dd>
+                <dt><kbd>Shift</kbd>+<kbd>Backspace</kbd></dt><dd>revert to the original</dd>
+                <dt><kbd>t</kbd></dt><dd>show the current stroke's path</dd>
+              </dl>
+              <p class="note">Changing size, colour or blend mode re-renders the current stroke live.</p>
+              <h3>View</h3>
+              <dl>
+                <dt><kbd>Ctrl</kbd>+wheel, <kbd>+</kbd> <kbd>−</kbd></dt><dd>zoom; <kbd>0</kbd> fit, <kbd>1</kbd> 100%</dd>
+                <dt>middle-drag, <kbd>Space</kbd>+drag</dt><dd>pan</dd>
+                <dt><kbd>a</kbd></dt><dd>colour adapt (auto-exposure on the cursor); <kbd>x</kbd> reset</dd>
+                <dt><kbd>Shift</kbd>+<kbd>A</kbd></dt><dd>10× contrast</dd>
+              </dl>
+            </section>
+            <section>
+              <h3>File</h3>
+              <dl>
+                <dt><kbd>n</kbd> <kbd>o</kbd> <kbd>d</kbd></dt><dd>new canvas, open image, save PNG (or drop an image anywhere)</dd>
+              </dl>
+              <h3>Integrator</h3>
+              <dl>
+                <dt><kbd>v</kbd></dt><dd>V-cycles per frame (1, 2, 4, 8)</dd>
+                <dt><kbd>PgUp</kbd> <kbd>PgDn</kbd></dt><dd>inspect gx, gy and every multigrid level</dd>
+                <dt><kbd>c</kbd></dt><dd>compare with the original</dd>
+                <dt><kbd>s</kbd> / <kbd>Shift</kbd>+<kbd>S</kbd></dt><dd>single-step / resume</dd>
+                <dt><kbd>r</kbd> / <kbd>Shift</kbd>+<kbd>R</kbd></dt><dd>randomise / zero the current solution — watch it converge</dd>
+                <dt><kbd>e</kbd></dt><dd>time the integrator</dd>
+              </dl>
+              <p class="note">Alt+click (or Ctrl+click on a Mac) works as a right-click.</p>
+              <p class="credit">
+                A WebGPU re-implementation of <a href="http://gradient-paint.com" target="_blank" rel="noopener">Real-Time Gradient-Domain Painting</a>
+                (James McCann &amp; Nancy S. Pollard, SIGGRAPH 2008).
+              </p>
+            </section>
+          </div>
+          <p class="dismiss">Press <kbd>F1</kbd>, <kbd>?</kbd> or <kbd>Esc</kbd> to close</p>
+        </div>
+      </div>
+      <div id="fatal" hidden></div>
+    </main>
+
+    <footer id="status">
+      <span id="st-size"></span>
+      <span id="st-brush"></span>
+      <span id="st-color" title="Paint colour (right-drag in Paint mode to change)"><i class="swatch"></i><span></span></span>
+      <span id="st-blend"></span>
+      <span class="spacer"></span>
+      <span id="st-cycles" title="V-cycles per frame (v)"></span>
+      <span id="st-zoom"></span>
+      <span id="st-fps"></span>
+    </footer>
+
+    <dialog id="dlg-new">
+      <form method="dialog">
+        <h3>New canvas</h3>
+        <div class="presets">
+          <button type="button" data-size="fit">Fit window</button>
+          <button type="button" data-size="513x513">513 × 513</button>
+          <button type="button" data-size="1025x769">1025 × 769</button>
+          <button type="button" data-size="1025x1025">1025 × 1025</button>
+          <button type="button" data-size="1920x1080">1920 × 1080</button>
+        </div>
+        <label>Width <input id="new-w" type="number" min="2" max="4096" value="1025" /></label>
+        <label>Height <input id="new-h" type="number" min="2" max="4096" value="769" /></label>
+        <p class="note">Sizes of 2<sup>k</sup>+1 give the multigrid solver its best convergence.</p>
+        <menu>
+          <button value="cancel">Cancel</button>
+          <button value="ok" class="primary">Create</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>

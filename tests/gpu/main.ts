@@ -2,6 +2,7 @@ import { requestGpuDevice } from '../../src/solver/gpu';
 import { runAll, TestResult } from './harness';
 import './solver.gpu';
 import './paint.gpu';
+import './display.gpu';
 
 declare global {
   interface Window {
