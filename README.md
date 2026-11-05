@@ -23,6 +23,16 @@ npm run dev
 Open the printed URL in a browser with WebGPU (current Chrome, Edge, Safari, or Firefox). `npm run build` produces a
 static site in `dist/`. Query parameters: `?size=1025x769` sets the initial canvas size (the default fills the window).
 
+### Deploying
+
+The build is a static site; host `dist/` anywhere that serves HTTPS (WebGPU only runs on secure pages, so plain
+`http://` on a LAN address and `file://` won't work). No special headers are needed.
+
+This repository deploys itself to GitHub Pages with `.github/workflows/pages.yml`: every push to `main` runs the unit
+tests, builds, and publishes to <https://bchandle.github.io/gradient-paint/>. The GPU test page is published too, at
+`tests/gpu/`, which is a convenient way to run the solver tests on a phone or tablet. One-time setup: repository
+**Settings → Pages → Source: GitHub Actions**.
+
 ## Using it
 
 The controls follow the original program. Press **F1** or **?** in the app for the full list.
