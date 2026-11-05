@@ -103,7 +103,8 @@ describe('stroke geometry', () => {
     for (const v of g) {
       expect(v[3]).toBeCloseTo(v[0] + 7, 5);
       expect(v[4]).toBeCloseTo(v[1] - 3, 5);
-      expect(v.slice(5)).toEqual([1, 0, 0, 1]);
+      expect(v.slice(5, 9)).toEqual([1, 0, 0, 1]);
+      expect(v[9]).toBe(1); // default strength
     }
   });
 });

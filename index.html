@@ -2,7 +2,14 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Gradient Paint" />
+    <meta name="theme-color" content="#202020" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
     <title>Gradient Paint</title>
     <meta name="description" content="Real-time gradient-domain painting in the browser (McCann &amp; Pollard 2008), with a WebGPU multigrid integrator." />
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' x2='1'%3E%3Cstop offset='0' stop-color='%23243b8f'/%3E%3Cstop offset='1' stop-color='%23f2b84b'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='7' fill='url(%23g)'/%3E%3Cpath d='M8 9h16L16 24z' fill='none' stroke='white' stroke-width='2.6' stroke-linejoin='round'/%3E%3C/svg%3E" />
@@ -30,6 +37,19 @@
     <main id="stage">
       <canvas id="gpu"></canvas>
       <canvas id="overlay"></canvas>
+      <nav id="dock" aria-label="Brush controls">
+        <div id="size-slider" class="vslider" role="slider" aria-label="Brush size" tabindex="0" title="Brush size (wheel, [ ])">
+          <div class="track"><div class="fill"></div><div class="knob"></div></div>
+          <span class="value"></span>
+        </div>
+        <button id="btn-pick" title="Pick: the next press picks a colour / clone source / example edge instead of drawing (right-click on a mouse)">Pick</button>
+        <button id="btn-value" title="Next press drags the colour value (−1…1; negative flips the edge)">Value</button>
+        <button id="btn-move" title="Move: drag the current stroke to a new place (g)">Move</button>
+        <button id="btn-fit" title="Fit the canvas to the window (0)">Fit</button>
+        <hr />
+        <button id="btn-finger" class="setting" title="What a single finger does: auto = draws until an Apple Pencil is used, then picks"></button>
+        <button id="btn-pressure" class="setting" title="What Apple Pencil pressure controls"></button>
+      </nav>
       <div id="hud-view" class="hud-label"></div>
       <div id="hud-mode" class="hud-label right"></div>
       <div id="toasts"></div>
@@ -93,6 +113,13 @@
                 <dt><kbd>e</kbd></dt><dd>time the integrator</dd>
               </dl>
               <p class="note">Alt+click (or Ctrl+click on a Mac) works as a right-click.</p>
+              <h3>iPad &amp; Apple Pencil</h3>
+              <dl>
+                <dt>Pencil</dt><dd>draws; pressure sets strength or width (dock setting); hover shows the brush</dd>
+                <dt>one finger</dt><dd>picks (colour / clone source / example edge) once a Pencil has been used — or draws, see the dock's <em>finger</em> setting</dd>
+                <dt>two fingers</dt><dd>pan &amp; pinch-zoom; a quick two-finger tap undoes</dd>
+                <dt>dock</dt><dd>brush size, <em>Pick</em> / <em>Value</em> (one-shot), <em>Move</em> stroke, <em>Fit</em></dd>
+              </dl>
               <p class="credit">
                 A WebGPU re-implementation of <a href="http://gradient-paint.com" target="_blank" rel="noopener">Real-Time Gradient-Domain Painting</a>
                 (James McCann &amp; Nancy S. Pollard, SIGGRAPH 2008).

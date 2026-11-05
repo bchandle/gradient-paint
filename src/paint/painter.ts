@@ -52,11 +52,12 @@ struct VOut {
   @location(0) uv: vec2f,
   @location(1) @interpolate(flat) t: vec2f,
   @location(2) @interpolate(flat) n: vec2f,
+  @location(3) strength: f32,
 };
 
 @vertex
 fn vs(@location(0) p: vec2f, @location(1) depth: f32, @location(2) uv: vec2f,
-      @location(3) t: vec2f, @location(4) n: vec2f) -> VOut {
+      @location(3) t: vec2f, @location(4) n: vec2f, @location(5) strength: f32) -> VOut {
   // gx(i, j) lives at (i + 1, j + 0.5) and gy(i, j) at (i + 0.5, j + 1): shift geometry by half a pixel
   let off = select(vec2f(0.0, 0.5), vec2f(0.5, 0.0), u.dim == 0u);
   let tc = p - off;
@@ -65,6 +66,7 @@ fn vs(@location(0) p: vec2f, @location(1) depth: f32, @location(2) uv: vec2f,
   o.uv = uv;
   o.t = t;
   o.n = n;
+  o.strength = strength;
   return o;
 }
 
@@ -112,8 +114,9 @@ fn fs(in: VOut) -> @location(0) vec4f {
   let tan = bilinear(brushTan, in.uv - vec2f(0.5, 0.0), u.tanX, u.tanY);
   let perp = bilinear(brushPerp, in.uv - vec2f(0.0, 0.5), u.perpX, u.perpY);
   // brush gradients are attenuated by their own alpha; gradient images (clone source) are opaque
-  let bt = tan.rgb * select(tan.a, 1.0, u.opaque == 1u);
-  let bp = perp.rgb * select(perp.a, 1.0, u.opaque == 1u);
+  // (and scaled by the per-vertex stroke strength, i.e. pen pressure)
+  let bt = tan.rgb * select(tan.a, 1.0, u.opaque == 1u) * in.strength;
+  let bp = perp.rgb * select(perp.a, 1.0, u.opaque == 1u) * in.strength;
   let bx = in.t.x * bt + in.n.x * bp;
   let by = in.t.y * bt + in.n.y * bp;
 
@@ -271,6 +274,7 @@ export class GradientCanvas {
               { shaderLocation: 2, offset: 12, format: 'float32x2' },
               { shaderLocation: 3, offset: 20, format: 'float32x2' },
               { shaderLocation: 4, offset: 28, format: 'float32x2' },
+              { shaderLocation: 5, offset: 36, format: 'float32' },
             ],
           },
         ],

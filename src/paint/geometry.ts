@@ -12,8 +12,8 @@
  */
 import type { Vec2 } from './stroke';
 
-/** floats per vertex: pos.xy, depth, uv.xy, t.xy, n.xy */
-export const VERTEX_FLOATS = 9;
+/** floats per vertex: pos.xy, depth, uv.xy, t.xy, n.xy, strength */
+export const VERTEX_FLOATS = 10;
 export const DEPTH_CENTER = 0.1;
 export const DEPTH_EDGE = 0.9;
 
@@ -26,6 +26,10 @@ export interface StrokeGeometryOptions {
   stepsAlong: number;
   /** clone brush: texture coordinates are image positions + offset, frame is identity */
   cloneOffset?: Vec2 | null;
+  /** per-point ribbon half-width (overrides `radius`, e.g. from pen pressure) */
+  radii?: ArrayLike<number>;
+  /** per-point multiplier on the brush gradient (e.g. from pen pressure); default 1 */
+  strengths?: ArrayLike<number>;
 }
 
 /** Stroke normal: the original's perpendicular() (CCW rotation), expressed in y-down coordinates. */
@@ -43,7 +47,8 @@ export function buildStrokeGeometry(points: Vec2[], opts: StrokeGeometryOptions)
   if (n < 2) return new Float32Array(0);
   const clone = opts.cloneOffset ?? null;
   const R = opts.texRadius;
-  const r = opts.radius;
+  const rad = (i: number) => opts.radii?.[i] ?? opts.radius;
+  const str = (i: number) => opts.strengths?.[i] ?? 1;
   const out: number[] = [];
 
   // frame of the current primitive
@@ -60,10 +65,10 @@ export function buildStrokeGeometry(points: Vec2[], opts: StrokeGeometryOptions)
   };
   let tu = 0;
   let tv = 0;
-  const vert = (p: Vec2, depth: number) => {
+  const vert = (p: Vec2, depth: number, strength: number) => {
     const u = clone ? p[0] + clone[0] : tu;
     const v = clone ? p[1] + clone[1] : tv;
-    out.push(p[0], p[1], depth, u, v, ft[0], ft[1], fn[0], fn[1]);
+    out.push(p[0], p[1], depth, u, v, ft[0], ft[1], fn[0], fn[1], strength);
   };
   const tex = (u: number, v: number) => {
     tu = u;
@@ -86,34 +91,37 @@ export function buildStrokeGeometry(points: Vec2[], opts: StrokeGeometryOptions)
       len = 0;
     }
 
+    const rc = rad(i - 1);
+    const rn = rad(i);
+    const sc = str(i - 1);
+    const sn = str(i);
+
     // joint blob: two triangles fanning from cur between the previous and next normals
     setFrameFromNormal(curPerp);
     tex(along, 2 * R);
-    const bp0 = add(cur, r, nextPerp);
-    const bp1 = add(cur, r, prevPerp);
-    vert(bp0, DEPTH_EDGE);
-    vert(bp1, DEPTH_EDGE);
+    vert(add(cur, rc, nextPerp), DEPTH_EDGE, sc);
+    vert(add(cur, rc, prevPerp), DEPTH_EDGE, sc);
     tex(along, R);
-    vert(cur, DEPTH_CENTER);
+    vert(cur, DEPTH_CENTER, sc);
     tex(along, 0);
-    vert(add(cur, -r, nextPerp), DEPTH_EDGE);
-    vert(add(cur, -r, prevPerp), DEPTH_EDGE);
+    vert(add(cur, -rc, nextPerp), DEPTH_EDGE, sc);
+    vert(add(cur, -rc, prevPerp), DEPTH_EDGE, sc);
     tex(along, R);
-    vert(cur, DEPTH_CENTER);
+    vert(cur, DEPTH_CENTER, sc);
 
     // segment: two quads (outer edge -> centre line), each as two triangles
     setFrameFromNormal(nextPerp);
     for (const side of [1, -1]) {
       const v0 = side > 0 ? 2 * R : 0;
-      const q: [Vec2, number, number, number][] = [
-        [add(cur, side * r, nextPerp), along, v0, DEPTH_EDGE],
-        [add(next, side * r, nextPerp), along + len, v0, DEPTH_EDGE],
-        [next, along + len, R, DEPTH_CENTER],
-        [cur, along, R, DEPTH_CENTER],
+      const q: [Vec2, number, number, number, number][] = [
+        [add(cur, side * rc, nextPerp), along, v0, DEPTH_EDGE, sc],
+        [add(next, side * rn, nextPerp), along + len, v0, DEPTH_EDGE, sn],
+        [next, along + len, R, DEPTH_CENTER, sn],
+        [cur, along, R, DEPTH_CENTER, sc],
       ];
       for (const k of [0, 1, 2, 0, 2, 3]) {
         tex(q[k][1], q[k][2]);
-        vert(q[k][0], q[k][3]);
+        vert(q[k][0], q[k][3], q[k][4]);
       }
     }
 

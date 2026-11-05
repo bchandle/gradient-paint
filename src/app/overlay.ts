@@ -110,10 +110,10 @@ export function drawOverlay(ctx: CanvasRenderingContext2D, s: OverlayState): voi
     for (const img of [s.edgePreview.perp, s.edgePreview.tan]) {
       const c = new OffscreenCanvas(img.width, img.height);
       c.getContext('2d')!.putImageData(img, 0, 0);
-      const w = Math.min(img.width * z, ctx.canvas.width / dpr - 24);
+      const w = Math.min(img.width * z, ctx.canvas.width / dpr - 100);
       ctx.fillStyle = 'rgba(0,0,0,0.5)';
-      ctx.fillRect(10, y - 2, w + 4, img.height * z + 4);
-      ctx.drawImage(c, 0, 0, w / z, img.height, 12, y, w, img.height * z);
+      ctx.fillRect(84, y - 2, w + 4, img.height * z + 4); // right of the dock
+      ctx.drawImage(c, 0, 0, w / z, img.height, 86, y, w, img.height * z);
       y += img.height * z + 10;
     }
   }

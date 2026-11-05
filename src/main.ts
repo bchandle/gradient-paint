@@ -1,4 +1,4 @@
-import { App, MODE_NAMES, MODES } from './app/app';
+import { App, IS_TOUCH_DEVICE, MAX_PIXELS, MODE_NAMES, MODES } from './app/app';
 import { BLEND_MODES } from './paint/blend';
 import { requestGpuDevice } from './solver/gpu';
 
@@ -93,8 +93,8 @@ function buildUi(app: App) {
     if (dlg.returnValue !== 'ok') return;
     const w = Math.round(Number(wIn.value));
     const h = Math.round(Number(hIn.value));
-    if (!(w >= 2 && h >= 2 && w <= 4096 && h <= 4096 && w * h <= 4.2e6)) {
-      toast('Canvas must be between 2×2 and 4096×4096 (at most ~4 megapixels).', 4000);
+    if (!(w >= 2 && h >= 2 && w <= 4096 && h <= 4096 && w * h <= MAX_PIXELS)) {
+      toast(`Canvas must be between 2×2 and 4096×4096 (at most ${(MAX_PIXELS / 1e6).toFixed(1)} megapixels on this device).`, 4000);
       return;
     }
     app.newCanvas(w, h);
@@ -121,6 +121,53 @@ function buildUi(app: App) {
   setInterval(() => {
     $('st-fps').textContent = `${app.fps.toFixed(0)} fps`;
   }, 500);
+
+  // dock (touch-friendly controls)
+  $('btn-pick').onclick = () => app.setPickLatch('pick');
+  $('btn-value').onclick = () => app.setPickLatch('value');
+  $('btn-move').onclick = () => app.toggleMoveLatch();
+  $('btn-fit').onclick = () => {
+    app.fitView();
+    update(app);
+  };
+  $('btn-finger').onclick = () => app.cycleFingerMode();
+  $('btn-pressure').onclick = () => app.cyclePressureMode();
+  $('st-color').onclick = () => {
+    if (app.mode === 'paint') app.setPickLatch('pick');
+  };
+  installSizeSlider(app);
+}
+
+/** Brush size on a logarithmic scale, 0.5 .. 200 px. */
+const SIZE_MIN = 0.5;
+const SIZE_MAX = 200;
+const sizeToT = (s: number) => Math.log(Math.min(SIZE_MAX, Math.max(SIZE_MIN, s)) / SIZE_MIN) / Math.log(SIZE_MAX / SIZE_MIN);
+const tToSize = (t: number) => {
+  const s = SIZE_MIN * Math.pow(SIZE_MAX / SIZE_MIN, Math.min(1, Math.max(0, t)));
+  return s < 10 ? Math.max(SIZE_MIN, Math.round(s * 2) / 2) : Math.round(s);
+};
+
+function installSizeSlider(app: App): void {
+  const el = $('size-slider');
+  const track = el.querySelector('.track') as HTMLElement;
+  const set = (e: PointerEvent) => {
+    const r = track.getBoundingClientRect();
+    app.setBrushSize(tToSize(1 - (e.clientY - r.top) / r.height));
+  };
+  el.addEventListener('pointerdown', (e) => {
+    el.setPointerCapture(e.pointerId);
+    set(e);
+  });
+  el.addEventListener('pointermove', (e) => {
+    if (el.hasPointerCapture(e.pointerId)) set(e);
+  });
+  el.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowUp' || e.key === 'ArrowRight') app.stepBrush(true);
+    else if (e.key === 'ArrowDown' || e.key === 'ArrowLeft') app.stepBrush(false);
+    else return;
+    e.preventDefault();
+    e.stopPropagation();
+  });
 }
 
 function fitSize(app: App): [number, number] {
@@ -145,6 +192,23 @@ function update(app: App): void {
   $('st-blend').textContent = app.blendDescription();
   $('st-cycles').innerHTML = `<b>${app.cyclesPerFrame}</b> V-cycle${app.cyclesPerFrame > 1 ? 's' : ''}/frame${app.singleStep ? ' (single-step)' : ''}`;
   $('st-zoom').textContent = `${Math.round(app.view.scale * 100)}%`;
+
+  // dock
+  const t = sizeToT(app.brushSize);
+  const slider = $('size-slider');
+  (slider.querySelector('.fill') as HTMLElement).style.height = `${t * 100}%`;
+  (slider.querySelector('.knob') as HTMLElement).style.top = `${(1 - t) * 100}%`;
+  (slider.querySelector('.value') as HTMLElement).textContent = app.brushSize < 10 ? app.brushSize.toFixed(1).replace(/\.0$/, '') : app.brushSize.toFixed(0);
+  slider.setAttribute('aria-valuenow', String(app.brushSize));
+  const pick = $('btn-pick');
+  pick.textContent = app.mode === 'paint' ? 'Colour' : app.mode === 'clone' ? 'Source' : 'Capture';
+  pick.classList.toggle('on', app.pickLatch === 'pick');
+  const value = $('btn-value');
+  value.hidden = app.mode !== 'paint';
+  value.classList.toggle('on', app.pickLatch === 'value');
+  $('btn-move').classList.toggle('on', app.moveLatch);
+  $('btn-finger').textContent = `finger: ${app.fingerMode === 'auto' ? (app.fingersDraw ? 'auto (draw)' : 'auto (pick)') : app.fingerMode === 'draw' ? 'draws' : 'picks'}`;
+  $('btn-pressure').textContent = `pressure: ${app.pressureMode}`;
 }
 
 function escapeHtml(s: string): string {
@@ -185,7 +249,13 @@ async function main() {
   } catch {
     /* storage unavailable: just show the hint */
   }
-  if (!seen) toast('Left-drag to paint gradients · right-drag to pick a colour · F1 for help', 6000);
+  if (!seen)
+    toast(
+      IS_TOUCH_DEVICE
+        ? 'Draw with the Pencil or a finger · Colour in the dock picks a colour · two fingers pan, zoom and tap to undo'
+        : 'Left-drag to paint gradients · right-drag to pick a colour · F1 for help',
+      7000,
+    );
 }
 
 void main();

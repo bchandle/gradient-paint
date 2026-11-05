@@ -18,6 +18,19 @@ import { DEFAULT_KERNEL, gaussianKernel, SmoothStroke, Vec2 } from '../paint/str
 import { GpuSolver } from '../solver/gpu';
 import { Display, ViewMode } from './display';
 import { channelMeans, imageGradients, loadImageFile, savePNG } from './image-io';
+import {
+  FINGER_MODES,
+  FingerMode,
+  isTwoFingerTap,
+  PEN_GRACE_MS,
+  pinchView,
+  PolicyState,
+  PRESSURE_MODES,
+  PressureMode,
+  pressureProfile,
+  routePointer,
+  View,
+} from './input-policy';
 import { drawOverlay, OverlayState } from './overlay';
 
 export type Mode = 'paint' | 'clone' | 'edge';
@@ -26,7 +39,10 @@ export const MODE_NAMES: Record<Mode, string> = { paint: 'Paint', clone: 'Clone'
 
 const COLOR_RATE = 0.99; // colour-adapt EMA rate (ColorRate)
 const COLOR_SEL_RADIUS = 100; // CSS px (ColorSelRad)
-const MAX_PIXELS = 4.2e6;
+/** iPads / phones: tighter memory budgets (and touch-oriented hints) */
+export const IS_TOUCH_DEVICE = typeof navigator !== 'undefined' && navigator.maxTouchPoints > 1;
+export const MAX_PIXELS = IS_TOUCH_DEVICE ? 2.4e6 : 4.2e6;
+const HISTORY_BYTES = (IS_TOUCH_DEVICE ? 128 : 384) * 1024 * 1024;
 const CYCLE_CHOICES = [1, 2, 4, 8];
 
 interface ViewSource {
@@ -79,6 +95,20 @@ export class App {
   edgePreview: { perp: ImageData; tan: ImageData } | null = null;
 
   // interaction
+  fingerMode: FingerMode = 'auto';
+  pressureMode: PressureMode = 'strength';
+  penSeen = false;
+  pickLatch: 'pick' | 'value' | null = null;
+  moveLatch = false;
+  private penDown = false;
+  private lastPenUp = -Infinity;
+  private colorValueMode = false;
+  private strokeIsPen = false;
+  private dragByPress = false;
+  private actionPointer: number | null = null;
+  private action: { cancel?: () => void } | null = null;
+  private touches = new Map<number, { start: Vec2; pos: Vec2; t: number }>();
+  gesture: { ids: [number, number]; startView: View; a0: Vec2; b0: Vec2; t0: number; maxMove: number } | null = null;
   painting = false;
   colorSelecting = false;
   edgeSelecting = false;
@@ -135,6 +165,7 @@ export class App {
     this.sampleBuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     new ResizeObserver(() => this.resize()).observe(stage);
     this.resize();
+    this.loadSettings();
     this.installInput();
   }
 
@@ -173,7 +204,7 @@ export class App {
     this.imageName = name;
     const { gx, gy } = imageGradients(rgba, W, H);
     this.mean = channelMeans(rgba, W, H);
-    this.canvas = new GradientCanvas(this.device, W, H, gx, gy);
+    this.canvas = new GradientCanvas(this.device, W, H, gx, gy, { historyBytes: HISTORY_BYTES });
     this.solver = new GpuSolver(this.device, W, H);
     this.solver.setGradientTextures(this.canvas.gx, this.canvas.gy);
     this.solver.setTargetMean(this.mean);
@@ -292,12 +323,13 @@ export class App {
     this.lastRenderKey = '';
   }
 
-  undo(): void {
+  undo(silent = false): void {
     let ok = false;
     this.submitNow((enc) => (ok = this.canvas.undo(enc)));
     this.current = null;
     this.dragging = null;
-    if (!ok) this.ui.toast('Nothing to undo');
+    this.moveLatch = false;
+    if (!ok && !silent) this.ui.toast('Nothing to undo');
     this.ui.update(this);
   }
 
@@ -366,22 +398,26 @@ export class App {
   // ---------------------------------------------------------------------------
   // strokes
 
-  private startStroke(pos: Vec2): void {
+  private startStroke(pos: Vec2, pressure = 0.5): boolean {
     if (this.mode === 'clone' && !this.clonePoint) {
-      this.ui.toast('Right-click to set the clone source first');
-      return;
+      this.ui.toast(`Set the clone source first (${this.configureHint()})`);
+      return false;
     }
     if (this.mode === 'edge' && !this.edge) {
-      this.ui.toast('Right-drag along an edge in the image to capture it first');
-      return;
+      this.ui.toast(`Capture an edge first: drag along one in the image (${this.configureHint()})`);
+      return false;
     }
+    // the previous stroke may have changed since the last frame (fast pens, quick dots):
+    // render it before snapshotting, or its latest samples would be lost
+    this.flushStroke();
     this.submitNow((enc) => this.canvas.pushSnapshot(enc));
     const stroke = this.strokes[this.mode];
     stroke.clear();
-    stroke.submit(pos);
+    stroke.submit(pos, pressure);
     this.current = { mode: this.mode, stroke };
     this.painting = true;
     this.ui.update(this);
+    return true;
   }
 
   private grabEdge(): void {
@@ -420,28 +456,41 @@ export class App {
     this.edgePreview = { perp: toImage(perp, edge.perp.width, edge.perp.height), tan: toImage(tan, edge.tan.width, edge.tan.height) };
   }
 
+  private flushStroke(): void {
+    if (!this.current) return;
+    const key = this.renderKey();
+    if (key === this.lastRenderKey) return;
+    const enc = this.device.createCommandEncoder({ label: 'flush-stroke' });
+    this.renderCurrentStroke(enc);
+    this.device.queue.submit([enc.finish()]);
+    this.lastRenderKey = key;
+    this.gradDirty = true;
+  }
+
   private renderKey(): string {
     if (!this.current) return '';
     const c = this.current;
-    return [c.mode, c.stroke.version, c.stroke.points.length, this.blend, this.brushSize, this.paintHsv.join(','), this.clonePoint?.join(','), this.edgeId].join('|');
+    return [c.mode, c.stroke.version, c.stroke.points.length, this.blend, this.brushSize, this.paintHsv.join(','), this.clonePoint?.join(','), this.edgeId, this.strokeIsPen && this.pressureMode].join('|');
   }
 
   private renderCurrentStroke(enc: GPUCommandEncoder): void {
     const c = this.current!;
     const pts = c.stroke.points;
+    // pen pressure -> per-point strength or width
+    const pressure = this.strokeIsPen ? pressureProfile(c.stroke.pressures, this.pressureMode, this.brushSize, c.mode === 'paint') : {};
     let geometry: Float32Array<ArrayBuffer>;
     let brush;
     if (c.mode === 'paint') {
-      geometry = buildStrokeGeometry(pts, { radius: this.brushSize, texRadius: 2, stepsAlong: 1 });
+      geometry = buildStrokeGeometry(pts, { radius: this.brushSize, texRadius: 2, stepsAlong: 1, ...pressure });
       brush = this.canvas.paintBrush(this.paintColor, this.brushSize);
     } else if (c.mode === 'edge') {
       if (!this.edge) return;
-      geometry = buildStrokeGeometry(pts, { radius: this.brushSize, texRadius: this.edge.radius, stepsAlong: this.edge.steps });
+      geometry = buildStrokeGeometry(pts, { radius: this.brushSize, texRadius: this.edge.radius, stepsAlong: this.edge.steps, ...pressure });
       brush = this.canvas.edgeBrush(this.edge);
     } else {
       if (!this.clonePoint || pts.length === 0) return;
       const off: Vec2 = [this.clonePoint[0] - pts[0][0], this.clonePoint[1] - pts[0][1]];
-      geometry = buildStrokeGeometry(pts, { radius: this.brushSize, texRadius: 0, stepsAlong: 0, cloneOffset: off });
+      geometry = buildStrokeGeometry(pts, { radius: this.brushSize, texRadius: 0, stepsAlong: 0, cloneOffset: off, ...pressure });
       brush = this.canvas.cloneBrush();
     }
     this.canvas.renderStroke(enc, geometry, brush, this.blend);
@@ -547,7 +596,7 @@ export class App {
     const st: OverlayState = {
       dpr: this.dpr,
       mouse: this.mouse,
-      mouseInside: this.mouseInside && !this.panning,
+      mouseInside: this.mouseInside && !this.panning && !this.gesture,
       brushRadiusPx: this.brushSize * this.view.scale,
       toScreen: (p) => this.toScreen(p),
       mode: this.mode,
@@ -563,7 +612,7 @@ export class App {
       exampleEdge: this.mode === 'edge' ? this.example.points : null,
       edgePreview: this.mode === 'edge' ? this.edgePreview : null,
       edgePreviewScale: Math.max(1, Math.min(4, Math.round(this.view.scale))),
-      colorSelector: this.colorSelecting ? { hsv: this.paintHsv, valueMode: this.shiftDown, radius: COLOR_SEL_RADIUS } : null,
+      colorSelector: this.colorSelecting ? { hsv: this.paintHsv, valueMode: this.colorValueMode || this.shiftDown, radius: COLOR_SEL_RADIUS } : null,
     };
     drawOverlay(this.overlayCtx, st);
   }
@@ -576,84 +625,230 @@ export class App {
     return [e.clientX - r.left, e.clientY - r.top];
   }
 
+  /** Raw pen pressure; mice and fingers report "normal" (0.5, which maps to strength 1). */
+  private pressureOf(e: PointerEvent): number {
+    return e.pointerType === 'pen' && e.pressure > 0 ? e.pressure : 0.5;
+  }
+
+  private penActive(): boolean {
+    return this.penDown || performance.now() - this.lastPenUp < PEN_GRACE_MS;
+  }
+
+  private policy(): PolicyState {
+    return {
+      fingerMode: this.fingerMode,
+      penSeen: this.penSeen,
+      penActive: this.penActive(),
+      pickLatch: this.pickLatch !== null,
+      spaceDown: this.spaceDown,
+      isMac: /Mac|iPhone|iPad/.test(navigator.platform),
+    };
+  }
+
+  /** The configure ("right button") action of the current mode. */
+  private configure(pos: Vec2, shift: boolean): void {
+    if (this.dragging && this.current) {
+      // configuring cancels a drag
+      this.current.stroke.translate(0, 0, this.dragging.points);
+      this.dragging = null;
+    }
+    if (this.mode === 'paint') {
+      const prev: RGB = [...this.paintHsv];
+      this.colorSelecting = true;
+      this.colorValueMode = shift || this.pickLatch === 'value';
+      this.action = { cancel: () => (this.paintHsv = prev) };
+    } else if (this.mode === 'clone') {
+      const prev = this.clonePoint;
+      this.clonePoint = pos;
+      this.action = { cancel: () => (this.clonePoint = prev) };
+    } else if (shift && this.example.points.length) {
+      this.example.submit(pos);
+      this.grabEdge();
+    } else {
+      const prevPts = this.example.points;
+      const prevP = this.example.pressures;
+      this.example.clear();
+      this.example.submit(pos);
+      this.edgeSelecting = true;
+      this.action = {
+        cancel: () => {
+          this.edgeSelecting = false;
+          this.example.restore(prevPts, prevP);
+        },
+      };
+    }
+    this.pickLatch = null; // the on-screen Pick latch is one-shot
+    this.ui.update(this);
+  }
+
+  /** Abandon whatever the action pointer started (used when a second finger turns it into a pinch). */
+  private cancelAction(): void {
+    this.action?.cancel?.();
+    this.action = null;
+    this.painting = false;
+    this.colorSelecting = false;
+    this.edgeSelecting = false;
+    this.panning = null;
+    if (this.actionPointer !== null && this.overlayCanvas.hasPointerCapture(this.actionPointer)) this.overlayCanvas.releasePointerCapture(this.actionPointer);
+    this.actionPointer = null;
+    this.ui.update(this);
+  }
+
   private installInput(): void {
     const el = this.overlayCanvas;
     el.addEventListener('contextmenu', (e) => e.preventDefault());
-    el.addEventListener('pointerenter', () => (this.mouseInside = true));
+    el.addEventListener('pointerenter', (e) => {
+      if (e.pointerType !== 'touch') this.mouseInside = true;
+    });
     el.addEventListener('pointerleave', () => (this.mouseInside = false));
+    // keep Safari from turning touches into page zoom, selection or callouts
+    for (const type of ['gesturestart', 'gesturechange', 'gestureend', 'dblclick', 'selectstart']) {
+      document.addEventListener(type, (e) => {
+        if (!(e.target instanceof HTMLInputElement)) e.preventDefault();
+      }, { passive: false });
+    }
+    el.addEventListener('touchstart', (e) => e.preventDefault(), { passive: false });
 
     el.addEventListener('pointerdown', (e) => {
       if (!this.solver) return;
+      const p = this.stagePos(e);
+      if (e.pointerType === 'pen') {
+        this.penDown = true;
+        if (!this.penSeen) {
+          this.penSeen = true;
+          this.saveSettings();
+          if (this.fingerMode === 'auto') this.ui.toast('Apple Pencil detected: the Pencil draws, a finger picks colours / sources, two fingers pan, zoom and tap to undo.', 6000);
+        }
+      }
+      if (e.pointerType === 'touch') {
+        this.touches.set(e.pointerId, { start: p, pos: p, t: performance.now() });
+        if (this.touches.size >= 2) {
+          if (!this.gesture && this.touches.size === 2 && !this.penActive()) {
+            this.cancelAction();
+            const [[ia, ta], [ib, tb]] = [...this.touches.entries()];
+            // a tap is measured from when/where each finger first touched, so a stroke
+            // cancelled by a second finger never also counts as a two-finger tap (undo)
+            const moved = Math.max(Math.hypot(ta.pos[0] - ta.start[0], ta.pos[1] - ta.start[1]), Math.hypot(tb.pos[0] - tb.start[0], tb.pos[1] - tb.start[1]));
+            this.gesture = { ids: [ia, ib], startView: { ...this.view }, a0: ta.pos, b0: tb.pos, t0: Math.min(ta.t, tb.t), maxMove: moved };
+          }
+          return;
+        }
+      }
+      if (this.actionPointer !== null && this.actionPointer !== e.pointerId) return; // one action at a time
+      const act = routePointer(e, this.policy());
+      if (act === 'ignore') return;
       el.setPointerCapture(e.pointerId);
-      this.mouse = this.stagePos(e);
+      this.actionPointer = e.pointerId;
+      this.mouse = p;
+      if (e.pointerType !== 'touch' || act === 'draw') this.mouseInside = true;
       this.shiftDown = e.shiftKey;
-      const pos = this.toImage(this.mouse);
-      // pan: middle button, or space + drag
-      if (e.button === 1 || (e.button === 0 && this.spaceDown)) {
-        this.panning = { x: this.mouse[0], y: this.mouse[1], ox: this.view.ox, oy: this.view.oy };
+      const pos = this.toImage(p);
+      this.action = {};
+      if (act === 'pan') {
+        this.panning = { x: p[0], y: p[1], ox: this.view.ox, oy: this.view.oy };
         e.preventDefault();
         return;
       }
-      const configure = e.button === 2 || (e.button === 0 && (e.altKey || (e.ctrlKey && navigator.platform.startsWith('Mac'))));
-      if (configure) {
-        if (this.dragging && this.current) {
-          // right click cancels a drag
-          this.current.stroke.translate(0, 0, this.dragging.points);
-          this.dragging = null;
-        }
-        if (this.mode === 'paint') {
-          this.colorSelecting = true;
-        } else if (this.mode === 'clone') {
-          this.clonePoint = pos;
-        } else if (e.shiftKey && this.example.points.length) {
-          this.example.submit(pos);
-          this.grabEdge();
-        } else {
-          this.example.clear();
-          this.example.submit(pos);
-          this.edgeSelecting = true;
-        }
+      if (act === 'configure') {
+        this.configure(pos, e.shiftKey);
         return;
       }
-      if (e.button !== 0) return;
-      if (this.dragging) {
-        this.dragging = null; // drop
+      if (this.dragging && !this.dragByPress) {
+        this.dragging = null; // drop (keyboard 'g' drag)
+      } else if (this.moveLatch && this.current) {
+        this.dragging = { start: pos, points: this.current.stroke.points.map((q) => [q[0], q[1]] as Vec2) };
+        this.dragByPress = true;
       } else if (e.shiftKey && this.current && this.current.mode === this.mode) {
-        this.current.stroke.submit(pos); // straight line to the cursor
+        this.current.stroke.submit(pos, this.pressureOf(e)); // straight line to the cursor
+        this.painting = true;
       } else {
-        this.startStroke(pos);
+        const isPen = e.pointerType === 'pen';
+        if (this.startStroke(pos, this.pressureOf(e))) {
+          this.strokeIsPen = isPen;
+          this.action = { cancel: () => this.undo(true) };
+        }
       }
     });
 
     el.addEventListener('pointermove', (e) => {
+      const p = this.stagePos(e);
+      if (e.pointerType === 'touch') {
+        const t = this.touches.get(e.pointerId);
+        if (t) t.pos = p;
+        if (this.gesture) {
+          const g = this.gesture;
+          if (g.ids.includes(e.pointerId)) {
+            const a = this.touches.get(g.ids[0])?.pos ?? g.a0;
+            const b = this.touches.get(g.ids[1])?.pos ?? g.b0;
+            g.maxMove = Math.max(g.maxMove, Math.hypot(a[0] - g.a0[0], a[1] - g.a0[1]), Math.hypot(b[0] - g.b0[0], b[1] - g.b0[1]));
+            this.view = pinchView(g.startView, g.a0, g.b0, a, b);
+            this.ui.update(this);
+          }
+          return;
+        }
+      }
+      if (this.actionPointer !== null && e.pointerId !== this.actionPointer) return;
+      if (this.actionPointer === null && e.pointerType === 'touch') return; // e.g. the finger left over from a pinch
       const old = this.mouse;
-      this.mouse = this.stagePos(e);
+      this.mouse = p;
+      if (e.pointerType !== 'touch') this.mouseInside = true; // includes Pencil hover
       this.shiftDown = e.shiftKey;
-      const pos = this.toImage(this.mouse);
+      const pos = this.toImage(p);
       if (this.panning) {
-        this.view.ox = this.panning.ox + this.mouse[0] - this.panning.x;
-        this.view.oy = this.panning.oy + this.mouse[1] - this.panning.y;
+        this.view.ox = this.panning.ox + p[0] - this.panning.x;
+        this.view.oy = this.panning.oy + p[1] - this.panning.y;
         return;
       }
       if (this.dragging && this.current) {
         const [sx, sy] = this.dragging.start;
         this.current.stroke.translate(pos[0] - sx, pos[1] - sy, this.dragging.points);
       } else if (this.colorSelecting) {
-        this.moveColorSelector(this.mouse[0] - old[0], this.mouse[1] - old[1], e.shiftKey);
+        this.moveColorSelector(p[0] - old[0], p[1] - old[1], this.colorValueMode || e.shiftKey);
       } else if (this.painting && this.current) {
-        // coalesced events give smoother strokes on fast pointers
+        // coalesced events carry every sample (240 Hz for the Pencil), with its own pressure
         const evs = typeof e.getCoalescedEvents === 'function' ? e.getCoalescedEvents() : [];
-        for (const ce of evs.length ? evs : [e]) this.current.stroke.submit(this.toImage(this.stagePos(ce)));
+        for (const ce of evs.length ? evs : [e]) this.current.stroke.submit(this.toImage(this.stagePos(ce)), this.pressureOf(ce));
       }
       if (this.edgeSelecting) this.example.submit(pos);
     });
 
     const end = (e: PointerEvent) => {
+      if (e.pointerType === 'pen') {
+        this.penDown = false;
+        this.lastPenUp = performance.now();
+      }
+      if (e.pointerType === 'touch') {
+        this.touches.delete(e.pointerId);
+        const g = this.gesture;
+        if (g) {
+          if (this.touches.size === 0) {
+            this.gesture = null;
+            if (e.type === 'pointerup' && isTwoFingerTap(performance.now() - g.t0, g.maxMove)) {
+              this.undo();
+              this.ui.toast('Undo');
+            }
+          }
+          return;
+        }
+      }
+      if (e.pointerId !== this.actionPointer) return;
+      this.actionPointer = null;
+      if (e.type === 'pointercancel') {
+        this.cancelAction();
+        return;
+      }
+      this.action = null;
+      if (e.pointerType === 'touch') this.mouseInside = false;
       if (this.panning) {
         this.panning = null;
         return;
       }
-      if (e.button === 0) this.painting = false;
+      this.painting = false;
+      if (this.dragByPress) {
+        this.dragging = null;
+        this.dragByPress = false;
+        this.moveLatch = false;
+      }
       if (this.colorSelecting) this.colorSelecting = false;
       if (this.edgeSelecting) {
         this.edgeSelecting = false;
@@ -689,6 +884,68 @@ export class App {
       if (e.key === ' ') this.spaceDown = false;
       if (e.key === 'Shift') this.shiftDown = false;
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // on-screen controls (touch)
+
+  /** Arm the one-shot Pick latch: the next press configures instead of drawing ('value' = value slider). */
+  setPickLatch(kind: 'pick' | 'value' | null): void {
+    this.pickLatch = this.pickLatch === kind ? null : kind;
+    this.ui.update(this);
+  }
+
+  toggleMoveLatch(): void {
+    if (!this.current) {
+      this.ui.toast('Nothing to move: draw a stroke first');
+      this.moveLatch = false;
+    } else this.moveLatch = !this.moveLatch;
+    this.ui.update(this);
+  }
+
+  setBrushSize(v: number): void {
+    this.brushSize = Math.min(400, Math.max(0.5, v));
+    this.ui.update(this);
+  }
+
+  cycleFingerMode(): void {
+    this.fingerMode = FINGER_MODES[(FINGER_MODES.indexOf(this.fingerMode) + 1) % FINGER_MODES.length];
+    this.saveSettings();
+    this.ui.update(this);
+  }
+
+  cyclePressureMode(): void {
+    this.pressureMode = PRESSURE_MODES[(PRESSURE_MODES.indexOf(this.pressureMode) + 1) % PRESSURE_MODES.length];
+    this.saveSettings();
+    this.ui.update(this);
+  }
+
+  /** Whether a finger currently draws (for UI hints). */
+  get fingersDraw(): boolean {
+    return this.fingerMode === 'draw' || (this.fingerMode === 'auto' && !this.penSeen);
+  }
+
+  private configureHint(): string {
+    return IS_TOUCH_DEVICE ? (this.fingersDraw ? 'use Pick' : 'tap with a finger, or use Pick') : 'right-click, or use Pick';
+  }
+
+  private loadSettings(): void {
+    try {
+      const s = JSON.parse(localStorage.getItem('gp-settings') ?? '{}');
+      if (FINGER_MODES.includes(s.fingerMode)) this.fingerMode = s.fingerMode;
+      if (PRESSURE_MODES.includes(s.pressureMode)) this.pressureMode = s.pressureMode;
+      this.penSeen = !!s.penSeen;
+    } catch {
+      /* storage unavailable */
+    }
+  }
+
+  private saveSettings(): void {
+    try {
+      localStorage.setItem('gp-settings', JSON.stringify({ fingerMode: this.fingerMode, pressureMode: this.pressureMode, penSeen: this.penSeen }));
+    } catch {
+      /* storage unavailable */
+    }
   }
 
   /** Relative drag on an HSV wheel (shift: value slider in [-1, 1]), as in the original. */
