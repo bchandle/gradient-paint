@@ -1,0 +1,15 @@
+{
+  "name": "Gradient Paint",
+  "short_name": "Gradient Paint",
+  "description": "Real-time gradient-domain painting with a WebGPU multigrid integrator.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#161616",
+  "theme_color": "#202020",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "apple-touch-icon.png", "sizes": "180x180", "type": "image/png" }
+  ]
+}

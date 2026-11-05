@@ -240,3 +240,59 @@ describe('paint + integrate end to end', () => {
     canvas.destroy();
   });
 });
+
+describe('pen pressure', () => {
+  async function strokeWith(device: GPUDevice, opts: { radii?: number[]; strengths?: number[] }) {
+    const canvas = new GradientCanvas(device, W, H);
+    const pts = line(5, 58, Y0);
+    const enc = device.createCommandEncoder();
+    canvas.pushSnapshot(enc);
+    canvas.renderStroke(enc, buildStrokeGeometry(pts, { radius: R, texRadius: 2, stepsAlong: 1, ...opts }), canvas.paintBrush(COLOR, R), 'add');
+    device.queue.submit([enc.finish()]);
+    const gy = new Field(W, H - 1, await readTexture(device, canvas.gy));
+    canvas.destroy();
+    return { gy, pts };
+  }
+
+  test('strength scales the brush gradient exactly', async ({ device }) => {
+    const n = 54;
+    const { gy } = await strokeWith(device, { strengths: Array(n).fill(0.4) });
+    for (let i = 15; i < 45; i++)
+      for (let j = 0; j < H - 1; j++) {
+        const want = -0.4 * COLOR[0] * tent(-(j + 1 - Y0));
+        assert(Math.abs(gy.data[gy.idx(i, j)] - want) < 1e-6, `gy(${i},${j}) = ${gy.data[gy.idx(i, j)]}, expected ${want}`);
+      }
+  });
+
+  test('strength varying along the stroke is interpolated between samples', async ({ device }) => {
+    const pts = line(5, 58, Y0);
+    const strengths = pts.map((p) => (p[0] - 5) / 53); // 0 -> 1 left to right
+    const { gy } = await strokeWith(device, { strengths });
+    let prev = 0;
+    for (let i = 10; i < 54; i++) {
+      const colSum = -[...Array(H - 1).keys()].reduce((a, j) => a + gy.data[gy.idx(i, j)], 0);
+      const want = (COLOR[0] / 2) * ((i + 0.5 - 5) / 53); // gy columns sit at x = i + 0.5
+      assert(Math.abs(colSum - want) < 2e-3, `column ${i}: step ${colSum}, expected ${want}`);
+      assert(colSum > prev, 'monotone along the stroke');
+      prev = colSum;
+    }
+  });
+
+  test('size mode changes the width but keeps the step across a gradient-brush stroke', async ({ device }) => {
+    const n = 54;
+    // pressed lightly: thinner stroke (tent half-width radius/2 = 1 px, so pixel sampling is exact)
+    const radius = 2;
+    const { gy } = await strokeWith(device, { radii: Array(n).fill(radius), strengths: Array(n).fill(R / radius) });
+    for (let i = 15; i < 45; i++) {
+      let sum = 0;
+      let widest = 0;
+      for (let j = 0; j < H - 1; j++) {
+        const v = gy.data[gy.idx(i, j)];
+        sum += v;
+        if (Math.abs(v) > 1e-7) widest = Math.max(widest, Math.abs(j + 1 - Y0));
+      }
+      assert(Math.abs(sum + COLOR[0] / 2) < 1e-5, `step ${sum} should stay ${-COLOR[0] / 2}`);
+      assert(widest < R / 2, `profile narrower than the full-pressure tent (${widest})`);
+    }
+  });
+});

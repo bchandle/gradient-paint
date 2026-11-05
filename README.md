@@ -46,6 +46,25 @@ The controls follow the original program. Press **F1** or **?** in the app for t
 
 Changing the colour, size or blend mode re-renders the current stroke, as it did in the original.
 
+### iPad and Apple Pencil
+
+It runs in Safari on iPadOS 26 (WebGPU), and can be added to the Home Screen to run full-screen.
+
+- **Pencil** draws. Its **pressure** controls stroke strength (default) or width; the dock's *pressure* button switches
+  between strength, size and off. In *size* mode the gradient brush keeps its tone, so pressure changes edge softness.
+  **Hover** (M2 iPads and later) shows the brush cursor.
+- **One finger** does what the right mouse button did: picks the colour, sets the clone source, or captures an example
+  edge. Until a Pencil has been used, fingers draw instead, so the app also works with fingers only. The dock's *finger*
+  button overrides this.
+- **Two fingers** pan and pinch-zoom; a quick **two-finger tap undoes**.
+- **Palm rejection:** large contacts are ignored, and so is any touch while the Pencil is down or just lifted.
+- **The dock** on the left has the brush size slider, one-shot **Colour/Source/Capture** and **Value** pickers (the
+  right-button and Shift+right-button actions), **Move** (the `g` key), and **Fit**.
+
+Keyboard-only actions (Shift+click straight lines, the debug keys) work with a hardware keyboard. Pencil double-tap,
+squeeze and barrel roll aren't exposed to web pages. The limits are smaller on touch devices (2.4 MP canvases, 128 MB of
+undo history).
+
 ## How it works
 
 ```
@@ -95,7 +114,7 @@ npm run test:unit
 npm run test:gpu
 ```
 
-**Unit tests** (Vitest, CPU), in `tests/unit`:
+**Unit tests** (Vitest, CPU), in `tests/unit`, including the touch/Pencil input policy, pressure response and pinch maths:
 - Operators: level sizes, stencil coefficients, restriction/interpolation stencils and exactness, RHS = Neumann Laplacian, smoother fixed points.
 - Convergence: the paper's ρ≈0.34 on 65×65 (power iteration), bounds for other sizes and aspect ratios, monotone error decrease, Fig. 12 behaviour.
 - Integrating non-conservative fields converges to an independent exact least-squares solution (CG).
@@ -105,8 +124,13 @@ npm run test:gpu
 - Every WGSL kernel against the CPU reference.
 - Full V-cycles against the reference solver (max difference ~6e-6).
 - GPU convergence: ρ on 65×65, convergence to the exact solution, a megapixel canvas.
-- Brush profiles against analytic ground truth, all five blend modes against the CPU model, clone offsets, edge capture → playback round trip, undo/revert, paint + integrate end to end.
+- Brush profiles against analytic ground truth, including pen-pressure strength and width, all five blend modes against the CPU model, clone offsets, edge capture → playback round trip, undo/revert, paint + integrate end to end.
 - The display shader, rendered offscreen.
+
+**End-to-end touch tests**, in `tests/e2e/touch.e2e.mjs` (`npm run test:e2e`), drive the real app in an emulated
+touch device with synthetic Apple Pencil (pen pointer with pressure and hover) and multi-touch input through the Chrome
+DevTools Protocol. They cover finger vs. Pencil routing, pressure, palm rejection, pinch/pan, two-finger-tap undo, the dock
+and settings persistence.
 
 `npm run test:gpu` starts Vite and runs the suite in headless Chromium through [Playwright](https://playwright.dev).
 Install it with `npm i -D playwright && npx playwright install chromium`, or point `NODE_PATH` at an existing install.
