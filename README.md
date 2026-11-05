@@ -145,4 +145,4 @@ To test on your actual hardware, run `npm run dev` and open `/tests/gpu/index.ht
 ## Credits
 
 Algorithm, original application and paper: James McCann and Nancy S. Pollard, *Real-Time Gradient-Domain Painting*,
-ACM SIGGRAPH 2008 — <http://gradient-paint.com>. The original code is "free for noncommercial use; please give credit".
+ACM SIGGRAPH 2008 — <https://graphics.cs.cmu.edu/projects/gradient-paint/>. The original code is "free for noncommercial use; please give credit".
